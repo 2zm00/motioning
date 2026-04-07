@@ -151,11 +151,12 @@ if __name__ == "__main__":
         
         count = 0
         state = 'DOWN'
+        dist_val = 0.0
         
         # 2. 턱걸이 분석 실행
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
-            count, state, angle = estimator.analyze_pullup(landmarks)
+            count, state, dist_val = estimator.analyze_pullup(landmarks)
             
         # 3. 마스크 및 관절 그리기 (np.where 덮어쓰기 위해 결과를 frame 에 다시 저장)
         frame = estimator.draw_landmarks(frame, results)
@@ -176,7 +177,6 @@ if __name__ == "__main__":
                     cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3, cv2.LINE_AA)
                     
         # 거리를 눈으로 보며 튜닝할 수 있도록 Dist 수치 표시
-        dist_val = angle if angle else 0 # angle변수를 dist로 재활용함
         cv2.putText(frame, f'Dist(Shoulder-Bar): {dist_val:.2f}', (20, 95), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                     
