@@ -48,37 +48,30 @@ class PullupEstimator:
         
         p = self.mp_pose.PoseLandmark
         
-        # 1. 랜드마크 추출 (왼쪽 기준)
-        left_shoulder = [landmarks[p.LEFT_SHOULDER.value].x, landmarks[p.LEFT_SHOULDER.value].y]
-        left_elbow = [landmarks[p.LEFT_ELBOW.value].x, landmarks[p.LEFT_ELBOW.value].y]
-        left_wrist = [landmarks[p.LEFT_WRIST.value].x, landmarks[p.LEFT_WRIST.value].y]
+        # 1. 랜드마크 추출 (신체 Y좌표 위주 평균치 사용으로 안정성 극대화)
+        shoulder_y = (landmarks[p.LEFT_SHOULDER.value].y + landmarks[p.RIGHT_SHOULDER.value].y) / 2.0
+        elbow_y = (landmarks[p.LEFT_ELBOW.value].y + landmarks[p.RIGHT_ELBOW.value].y) / 2.0
+        bar_y = (landmarks[p.LEFT_WRIST.value].y + landmarks[p.RIGHT_WRIST.value].y) / 2.0
         
-        # 턱걸이 정확도를 높이기 위한 얼굴/바(Bar) 위치 비교 포인트 추출
-        nose_y = landmarks[p.NOSE.value].y
-        
-        # 양쪽 손목의 Y 위치 평균을 철봉(Bar)의 위치로 가정
-        left_wrist_y = landmarks[p.LEFT_WRIST.value].y
-        right_wrist_y = landmarks[p.RIGHT_WRIST.value].y
-        bar_y = (left_wrist_y + right_wrist_y) / 2.0
+        # 각도 대신 어깨와 철봉 사이의 거리(Distance)를 계산하여 디버깅용으로 활용
+        dist = shoulder_y - bar_y
 
-        # 각도 계산 (왼팔 기준) - 주로 디버그 표시용으로 사용
-        angle = self.calculate_angle(left_shoulder, left_elbow, left_wrist)
-
-        # 2. 상태 전환 로직 (State Machine) - 엄격한(Strict) 분리 처리
-        # 하체가 잘리거나 손목이 화면 밖으로 벗어나 각도가 튀는 현상(=무한 카운트 버그) 방지용
+        # 2. 상태 전환 로직 (State Machine) - 물리 기반 완화 모델
         if self.pullup_state == 'UP':
-            # 완전히 매달려서 내려간 상태를 증명하기 전까지는 DOWN으로 리셋하지 않음
-            # (코가 손목보다 화면 높이의 15% 이상 아래로 확실하게 내려왔을 때만 리셋)
-            if nose_y > bar_y + 0.15:
+            # UP -> DOWN 리셋: '팔꿈치가 어깨보다 위로 간다'는 조건 삭제 (인식률 저하 원인)
+            # 순수하게 영상 인물의 '어깨가 철봉(손목)에서 다시 멀어짐' 만 체크 (거리를 0.25에서 0.18로 대폭 완화)
+            if dist > 0.18:
                 self.pullup_state = 'DOWN'
                 
         elif self.pullup_state == 'DOWN':
-            # 완전히 올라가서 코가 바(손목) 위로 돌파했을 때 1회 인정
-            if nose_y < bar_y:
+            # DOWN -> UP 1회 인정 로직 (제안해주신 방식 적용)
+            # 조건 1. 어깨가 팔꿈치와 손목 사이로 들어감 (당기면서 팔꿈치(Elbow)가 어깨(Shoulder) 아래로 내려가므로 Y값이 커짐) -> shoulder_y < elbow_y
+            # 조건 2. 어깨가 손목에 얼추 접근함 -> dist < 0.15
+            if shoulder_y < elbow_y and (dist < 0.15):
                 self.pullup_state = 'UP'
                 self.pullup_count += 1
 
-        return self.pullup_count, self.pullup_state, angle
+        return self.pullup_count, self.pullup_state, dist
 
     def draw_landmarks(self, frame, results):
         """비디오 프레임에 관절 위치, 연결선 및 파란색 Segmentation Mask 틴트를 그립니다."""
@@ -112,22 +105,46 @@ class PullupEstimator:
         return frame
 
 
+def resize_with_pad(image, target_width=1280, target_height=720):
+    """원본 비율을 유지하면서 타겟 크기에 맞추고, 모자란 부분은 검은색 여백(레터박스)으로 채웁니다."""
+    h, w = image.shape[:2]
+    scale = min(target_width / w, target_height / h)
+    
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    resized = cv2.resize(image, (new_w, new_h))
+    
+    delta_w = target_width - new_w
+    delta_h = target_height - new_h
+    top, bottom = delta_h // 2, delta_h - (delta_h // 2)
+    left, right = delta_w // 2, delta_w - (delta_w // 2)
+    
+    return cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+
+
 if __name__ == "__main__":
-    # 간단한 웹캠 테스트용 코드
-    cap = cv2.VideoCapture(0)
+    import sys
+    
+    # 터미널 실행 시 뒤에 동영상 파일 경로를 주면 영상을 재생, 없으면 웹캠(0) 실행
+    video_source = sys.argv[1] if len(sys.argv) > 1 else 0
+    is_webcam = (video_source == 0)
+    
+    cap = cv2.VideoCapture(video_source)
     estimator = PullupEstimator()
     
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
-            print("웹캠 프레임을 읽어올 수 없습니다.")
+            print("영상 스트림이 종료되었거나 완전히 읽었습니다.")
             break
             
-        # 프레임 해상도 고정 (초기 해상도 변동으로 인한 MediaPipe Segmentation 에러 방지)
-        frame = cv2.resize(frame, (1280, 720))
+        # 프레임을 1280x720 박스 안에 비율을 유지한 채 끼워넣고 남는 곳은 검정칠함
+        # 이렇게 하면 y좌표 정규화(0~1) 환경에서 상하 비율이 일정해져 턱걸이 로직이 틀어지지 않음
+        frame = resize_with_pad(frame, 1280, 720)
             
-        # 화면 미러링 효과 (좌우 반전)
-        frame = cv2.flip(frame, 1)
+        # 웹캠인 경우에만 거울처럼 좌우 반전 시킴 (동영상 파일은 뷰어 방향 그대로 유지)
+        if is_webcam:
+            frame = cv2.flip(frame, 1)
         
         # 1. Pose 추정
         results = estimator.process(frame)
@@ -144,7 +161,7 @@ if __name__ == "__main__":
         frame = estimator.draw_landmarks(frame, results)
             
         # 4. 화면 UI 표시
-        cv2.rectangle(frame, (0, 0), (280, 80), (245, 117, 16), -1)
+        cv2.rectangle(frame, (0, 0), (280, 110), (245, 117, 16), -1)
         
         # 상태(State) 텍스트
         cv2.putText(frame, 'STAGE', (20, 25), 
@@ -157,6 +174,11 @@ if __name__ == "__main__":
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
         cv2.putText(frame, str(count), (140, 65), 
                     cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3, cv2.LINE_AA)
+                    
+        # 거리를 눈으로 보며 튜닝할 수 있도록 Dist 수치 표시
+        dist_val = angle if angle else 0 # angle변수를 dist로 재활용함
+        cv2.putText(frame, f'Dist(Shoulder-Bar): {dist_val:.2f}', (20, 95), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                     
         # 결과 이미지 렌더링
         cv2.imshow('Pull-up Tracker Tracker', frame)
